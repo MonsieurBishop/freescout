@@ -1649,6 +1649,9 @@ class Conversation extends Model
         if (!$folder) {
             $folder = $this->folder;
         }
+        if (!$folder) {
+            return '';
+        }
         $waiting_since_field = $folder->getWaitingSinceField();
         if ($waiting_since_field) {
             // For phone conversations.
