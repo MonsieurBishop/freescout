@@ -526,6 +526,18 @@ class FetchEmails extends Command
             }
             $message_header = $this->headerToStr($message->getHeader());
 
+            // ADVALLY 2026-05-05: skip auto-responders early to prevent
+            // staff-mailbox loops (e.g. our own UserEmailReplyError, vacation
+            // responders bouncing into a FreeScout mailbox, etc.).
+            // Without this, FreeScout fetches its own "Unable to process" auto-reply,
+            // resolves the embedded user_id, mismatches the From, and dispatches
+            // ANOTHER auto-reply -> infinite loop.
+            if ($message_header && \MailHelper::isAutoResponder($message_header)) {
+                $this->logError("Skipping auto-responder email (early check)");
+                $this->setSeen($message, $mailbox);
+                return;
+            }
+
             // Check Content-Type header.
             if (!$is_bounce && $message_header) {
                 if (\MailHelper::detectBounceByHeaders($message_header)) {
@@ -916,8 +928,15 @@ class FetchEmails extends Command
                     $this->logError("Sender address {$from} does not match ".$user->getFullName()." user email: ".$user->email.". Add ".$user->email." to user's Alternate Emails in the users's profile to allow the user reply from this address.");
                     $this->setSeen($message, $mailbox);
 
-                    // Send "Unable to process your update email" to user
-                    \App\Jobs\SendEmailReplyError::dispatch($from, $user, $mailbox)->onQueue('emails');
+                    // ADVALLY 2026-05-05: do not auto-reply when $from is another
+                    // active FreeScout mailbox - the auto-reply would itself be fetched
+                    // and trigger the same rejection on the receiving mailbox -> loop.
+                    if (\App\Mailbox::where("email", $from)->exists()) {
+                        $this->logError("Skipping auto-reply: from-address is another FreeScout mailbox");
+                    } else {
+                        // Send "Unable to process your update email" to user
+                        \App\Jobs\SendEmailReplyError::dispatch($from, $user, $mailbox)->onQueue('emails');
+                    }
 
                     return;
                 }

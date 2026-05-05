@@ -26,8 +26,18 @@ class UserEmailReplyError extends Mailable
     public function build()
     {
         \MailHelper::prepareMailable($this);
-        
-        return $this->subject(__('Unable to process your update'))
-            ->view('emails/user/email_reply_error');
+
+        // ADVALLY 2026-05-05: mark as auto-replied per RFC 3834 so receiving
+        // FreeScout mailboxes can detect this is an auto-response and skip
+        // it via MailHelper::isAutoResponder. Prevents staff-mailbox loops.
+        $this->withSwiftMessage(function ($swiftmessage) {
+            $headers = $swiftmessage->getHeaders();
+            $headers->addTextHeader("Auto-Submitted", "auto-replied");
+            $headers->addTextHeader("X-Auto-Response-Suppress", "All");
+            $headers->addTextHeader("Precedence", "auto_reply");
+        });
+
+        return $this->subject(__("Unable to process your update"))
+            ->view("emails/user/email_reply_error");
     }
 }
