@@ -363,9 +363,18 @@ class MailboxesController extends Controller
             $access = [];
             $mailbox_with_settings = $mailbox_user->mailboxesWithSettings()->where('mailbox_id', $id)->first();
 
-            foreach (Mailbox::$access_permissions as $perm) {
-                if (!empty($request->managers[$mailbox_user->id]['access'][$perm])) {
-                    $access[] = $request->managers[$mailbox_user->id]['access'][$perm];
+            // ADVALLY 2026-05-05: when a user is freshly added via the top
+            // user-list checkboxes (no Access Settings matrix row submitted
+            // for them), default to all 4 permissions granted instead of
+            // requiring an admin to manually click 4 boxes per user per
+            // mailbox. Detected via absence of any managers[uid] payload.
+            if (!isset($request->managers[$mailbox_user->id])) {
+                $access = Mailbox::$access_permissions;
+            } else {
+                foreach (Mailbox::$access_permissions as $perm) {
+                    if (!empty($request->managers[$mailbox_user->id]['access'][$perm])) {
+                        $access[] = $request->managers[$mailbox_user->id]['access'][$perm];
+                    }
                 }
             }
 
