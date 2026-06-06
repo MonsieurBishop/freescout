@@ -152,32 +152,10 @@ class Mail
             // Configure mail driver according to Mailbox settings.
             $oauth = $mailbox->outOauthEnabled();
 
-            // Refresh Access Token.
+            // Refresh Access Token (DWD service-account mint when enabled, else refresh-token grant).
+            // Runs before the a_token is read into the SMTP config below.
             if ($oauth) {
-                if ((strtotime($mailbox->oauthGetParam('issued_on')) + (int)$mailbox->oauthGetParam('expires_in')) < time()) {
-                    // Try to get an access token (using the authorization code grant)
-                    $token_data = \MailHelper::oauthGetAccessToken($mailbox->oauthGetParam('provider'), [
-                        'client_id' => $mailbox->getOutOauthClientId(),
-                        'client_secret' => $mailbox->out_password,
-                        'refresh_token' => $mailbox->oauthGetParam('r_token'),
-                    ]);
-
-                    if (!empty($token_data['a_token'])) {
-                        // In Google Workspace new refresh token is not returned after refreshing the token.
-                        if (empty($token_data['r_token'])) {
-                            $token_data['r_token'] = $mailbox->oauthGetParam('r_token');
-                        }
-                        $mailbox->setMetaParam('oauth', $token_data, true);
-                    } elseif (!empty($token_data['error'])) {
-                        $error_message = 'Error occurred refreshing oAuth Access Token: '.$token_data['error'];
-                        \Helper::log(\App\ActivityLog::NAME_EMAILS_SENDING, 
-                            \App\ActivityLog::DESCRIPTION_EMAILS_SENDING_ERROR_TO_CUSTOMER, [
-                            'error'   => $error_message,
-                            'mailbox' => $mailbox->name,
-                        ]);
-                        //throw new \Exception($error_message, 1);
-                    }
-                }
+                self::ensureFreshOAuthToken($mailbox, 'out', false);
             }
 
             \Config::set('mail.driver', $mailbox->getMailDriverName());
@@ -779,6 +757,12 @@ class Mail
     public static function getMailboxClient($mailbox)
     {
         $oauth = $mailbox->oauthEnabled();
+
+        // Ensure a fresh OAuth access token BEFORE it is read into the IMAP config below
+        // (DWD service-account mint when enabled, else refresh-token grant). Throws on failure.
+        if ($oauth) {
+            self::ensureFreshOAuthToken($mailbox, 'in', true);
+        }
         /*$new_library = config('app.new_fetching_library');
 
         if (!$new_library) {
@@ -828,35 +812,8 @@ class Mail
 
         $cm = new \Webklex\PHPIMAP\ClientManager(config('imap'));
 
-        // Refresh Access Token.
-        if ($oauth) {
-            if ((strtotime($mailbox->oauthGetParam('issued_on')) + (int)$mailbox->oauthGetParam('expires_in')) < time()) {
-                // Try to get an access token (using the authorization code grant)
-                $token_data = \MailHelper::oauthGetAccessToken($mailbox->oauthGetParam('provider'), [
-                    'client_id' => $mailbox->getInOauthClientId(),
-                    'client_secret' => $mailbox->in_password,
-                    'refresh_token' => $mailbox->oauthGetParam('r_token'),
-                ]);
-
-                if (!empty($token_data['a_token'])) {
-                    // In Google Workspace new refresh token is not returned after refreshing the token.
-                    if (empty($token_data['r_token'])) {
-                        $token_data['r_token'] = $mailbox->oauthGetParam('r_token');
-                    }
-                    $mailbox->setMetaParam('oauth', $token_data, true);
-                } elseif (!empty($token_data['error'])) {
-                    $error_message = 'Error occurred refreshing oAuth Access Token: '.$token_data['error'];
-                    \Helper::log(
-                        \App\ActivityLog::NAME_EMAILS_FETCHING, 
-                        \App\ActivityLog::DESCRIPTION_EMAILS_FETCHING_ERROR, [
-                            'error'   => $error_message,
-                            'mailbox' => $mailbox->name,
-                        ]
-                    );
-                    throw new \Exception($error_message, 1);
-                }
-            }
-        }
+        // Access token already ensured fresh above (see ensureFreshOAuthToken) before the
+        // IMAP config was built, so no refresh is needed here.
 
         // This makes it authenticate two times.
         //$cm->setTimeout(60);
@@ -997,6 +954,166 @@ class Mail
         }
 
         return $url;
+    }
+
+    /**
+     * Is Gmail Domain-Wide Delegation enabled for this mailbox?
+     * True only for gw (Google) mailboxes when a readable SA key is configured
+     * and the mailbox is in the rollout set ('all' or CSV of ids).
+     */
+    public static function gmailDwdEnabledForMailbox($mailbox)
+    {
+        if (!$mailbox || $mailbox->oauthGetParam('provider') !== self::OAUTH_PROVIDER_GOOGLE) {
+            return false;
+        }
+        $key_path = config('app.gmail_dwd_key');
+        if (empty($key_path) || !is_readable($key_path)) {
+            return false;
+        }
+        $set = trim((string)config('app.gmail_dwd_mailboxes'));
+        if ($set === '') {
+            return false;
+        }
+        if ($set === 'all') {
+            return true;
+        }
+        $ids = array_filter(array_map('trim', explode(',', $set)));
+        return in_array((string)$mailbox->id, $ids, true);
+    }
+
+    /**
+     * Mint a Gmail XOAUTH2 access token via service-account Domain-Wide Delegation
+     * (impersonating $subject_email). No per-mailbox consent or refresh token needed.
+     * Returns the same shape as oauthGetAccessToken() (minus r_token), or ['error'=>...].
+     * NOTE: never logs the key or the minted token; error strings carry only Google's
+     * error_description + HTTP code.
+     */
+    public static function oauthGetAccessTokenViaServiceAccount($subject_email)
+    {
+        $token_data = [];
+
+        $key_path = config('app.gmail_dwd_key');
+        if (empty($key_path) || !is_readable($key_path)) {
+            $token_data['error'] = 'DWD service-account key not configured or not readable';
+            return $token_data;
+        }
+        $key = json_decode(@file_get_contents($key_path), true);
+        if (empty($key['client_email']) || empty($key['private_key'])) {
+            $token_data['error'] = 'DWD service-account key malformed';
+            return $token_data;
+        }
+        if (empty($subject_email)) {
+            $token_data['error'] = 'DWD subject (mailbox email) missing';
+            return $token_data;
+        }
+
+        $b64url = function ($data) {
+            return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+        };
+
+        $now = time();
+        $jwt_header = $b64url(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
+        $jwt_claim  = $b64url(json_encode([
+            'iss'   => $key['client_email'],
+            'sub'   => $subject_email,
+            'scope' => 'https://mail.google.com/',
+            'aud'   => 'https://oauth2.googleapis.com/token',
+            'iat'   => $now,
+            'exp'   => $now + 3600,
+        ]));
+        $signing_input = $jwt_header.'.'.$jwt_claim;
+
+        $signature = '';
+        if (!openssl_sign($signing_input, $signature, $key['private_key'], OPENSSL_ALGO_SHA256)) {
+            $token_data['error'] = 'DWD JWT signing failed';
+            return $token_data;
+        }
+        $jwt = $signing_input.'.'.$b64url($signature);
+
+        $curl = curl_init('https://oauth2.googleapis.com/token');
+        curl_setopt($curl, CURLOPT_POST, true);
+        curl_setopt($curl, CURLOPT_POSTFIELDS, http_build_query([
+            'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'assertion'  => $jwt,
+        ]));
+        curl_setopt($curl, CURLOPT_HTTPHEADER, ['Content-Type: application/x-www-form-urlencoded']);
+        curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+        \Helper::setCurlDefaultOptions($curl);
+        curl_setopt($curl, CURLOPT_TIMEOUT, 30);
+
+        $response = curl_exec($curl);
+        $http_status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        if (PHP_VERSION_ID < 80000) {
+            curl_close($curl);
+        }
+
+        $result = json_decode($response, true);
+        if (!empty($result['access_token'])) {
+            $token_data['provider']   = self::OAUTH_PROVIDER_GOOGLE;
+            $token_data['a_token']    = $result['access_token'];
+            $token_data['issued_on']  = now()->toDateTimeString();
+            $token_data['expires_in'] = $result['expires_in'] ?? 3599;
+        } else {
+            $token_data['error'] = 'DWD token request failed (HTTP '.$http_status.'): '
+                .($result['error_description'] ?? ($result['error'] ?? 'unknown'));
+        }
+
+        return $token_data;
+    }
+
+    /**
+     * Ensure the mailbox has a non-expired OAuth access token cached in meta.oauth.
+     * Routes to DWD (service-account impersonation) when enabled, else the existing
+     * per-mailbox refresh-token grant. Centralizes the refresh so callers can read a
+     * fresh a_token immediately afterwards.
+     *
+     * @param  string $in_out         'in' (fetch) or 'out' (send)
+     * @param  bool   $throw_on_error fetch throws (preserves prior behavior); send logs
+     * @return bool   true if a valid token is present after the call
+     */
+    public static function ensureFreshOAuthToken($mailbox, $in_out = 'out', $throw_on_error = false)
+    {
+        // Still valid? (same check the inline blocks used)
+        if ((strtotime($mailbox->oauthGetParam('issued_on')) + (int)$mailbox->oauthGetParam('expires_in')) >= time()) {
+            return true;
+        }
+
+        if (self::gmailDwdEnabledForMailbox($mailbox)) {
+            $subject = ($in_out === 'in') ? $mailbox->getInOauthUsername() : $mailbox->getOutOauthUsername();
+            $token_data = self::oauthGetAccessTokenViaServiceAccount($subject);
+        } else {
+            $token_data = self::oauthGetAccessToken($mailbox->oauthGetParam('provider'), [
+                'client_id'     => ($in_out === 'in') ? $mailbox->getInOauthClientId() : $mailbox->getOutOauthClientId(),
+                'client_secret' => ($in_out === 'in') ? $mailbox->in_password : $mailbox->out_password,
+                'refresh_token' => $mailbox->oauthGetParam('r_token'),
+            ]);
+            // Google Workspace does not return a new refresh token on refresh; preserve it.
+            if (!empty($token_data['a_token']) && empty($token_data['r_token'])) {
+                $token_data['r_token'] = $mailbox->oauthGetParam('r_token');
+            }
+        }
+
+        if (!empty($token_data['a_token'])) {
+            $mailbox->setMetaParam('oauth', $token_data, true);
+            return true;
+        }
+
+        if (!empty($token_data['error'])) {
+            $error_message = 'Error occurred refreshing oAuth Access Token: '.$token_data['error'];
+            \Helper::log(
+                ($in_out === 'in') ? \App\ActivityLog::NAME_EMAILS_FETCHING : \App\ActivityLog::NAME_EMAILS_SENDING,
+                ($in_out === 'in') ? \App\ActivityLog::DESCRIPTION_EMAILS_FETCHING_ERROR : \App\ActivityLog::DESCRIPTION_EMAILS_SENDING_ERROR_TO_CUSTOMER,
+                [
+                    'error'   => $error_message,
+                    'mailbox' => $mailbox->name,
+                ]
+            );
+            if ($throw_on_error) {
+                throw new \Exception($error_message, 1);
+            }
+        }
+
+        return false;
     }
 
     public static function oauthGetAccessToken($provider_code, $params)

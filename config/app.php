@@ -215,6 +215,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Gmail Domain-Wide Delegation (DWD).
+    | When a service-account key is configured, gw (Google) mailboxes mint
+    | XOAUTH2 access tokens by impersonation instead of per-mailbox OAuth
+    | refresh tokens. Empty key => unchanged (refresh-token) behavior.
+    | gmail_dwd_mailboxes: 'all' or CSV of mailbox IDs (staged rollout); empty => none.
+    |-------------------------------------------------------------------------
+    */
+    'gmail_dwd_key'       => env('FREESCOUT_GMAIL_DWD_KEY', ''),
+    'gmail_dwd_mailboxes' => env('FREESCOUT_GMAIL_DWD_MAILBOXES', ''),
+
+    /*
+    |--------------------------------------------------------------------------
     | Fetch Mail Schedule.
     |-------------------------------------------------------------------------
     */
