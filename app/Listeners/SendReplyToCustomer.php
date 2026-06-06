@@ -24,7 +24,7 @@ class SendReplyToCustomer
     {
         $conversation = $event->conversation;
 
-        $main_customer_email = $conversation->customer->getMainEmail();
+        $main_customer_email = $conversation->customer ? $conversation->customer->getMainEmail() : null;
 
         // Do not send email if this is a Phone conversation and customer has no email.
         if ($conversation->isPhone()) {
