@@ -1079,8 +1079,8 @@ class Mail
      */
     public static function ensureFreshOAuthToken($mailbox, $in_out = 'out', $throw_on_error = false)
     {
-        // Still valid? (same check the inline blocks used)
-        if ((strtotime($mailbox->oauthGetParam('issued_on')) + (int)$mailbox->oauthGetParam('expires_in')) >= time()) {
+        // Still valid? Refresh 60s early so a token can't expire mid IMAP/SMTP handshake.
+        if ((strtotime($mailbox->oauthGetParam('issued_on')) + (int)$mailbox->oauthGetParam('expires_in') - 60) > time()) {
             return true;
         }
 
