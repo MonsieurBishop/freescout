@@ -1043,8 +1043,14 @@ class Mail
 
         $response = curl_exec($curl);
         $http_status = curl_getinfo($curl, CURLINFO_HTTP_CODE);
+        $curl_err = ($response === false) ? curl_error($curl) : '';
         if (PHP_VERSION_ID < 80000) {
             curl_close($curl);
+        }
+
+        if ($response === false) {
+            $token_data['error'] = 'DWD token request failed (curl): '.$curl_err;
+            return $token_data;
         }
 
         $result = json_decode($response, true);
