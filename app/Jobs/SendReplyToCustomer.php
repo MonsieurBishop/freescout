@@ -236,7 +236,13 @@ class SendReplyToCustomer implements ShouldQueue
         $headers['Message-ID'] = $this->message_id;
 
         // https://github.com/freescout-help-desk/freescout/issues/5121
-        if ($this->customer->id == $this->conversation->customer_id) {
+        // $this->customer (the recipient passed to the job) may be null by the time
+        // the job runs — e.g. the customer was deleted/merged during the up-to-168h
+        // retry window. Guard the ->id deref; a null customer falls through to the
+        // email-based recovery below (the `if (!$this->customer)` block) which
+        // re-fetches by email or returns gracefully instead of fataling here.
+        // Fixes: LT-457467 (Attempt to read property "id" on null at line ~239).
+        if ($this->customer && $this->customer->id == $this->conversation->customer_id) {
             $this->customer_email = $this->conversation->customer_email;
         } else {
             $this->customer_email = $this->last_thread->getToArray()[0] ?: $this->conversation->customer_email;
