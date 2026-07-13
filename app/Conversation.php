@@ -1284,11 +1284,18 @@ class Conversation extends Model
         // Make conversation Unassigned if current assignee does not have
         // access to the target mailbox.
         // https://github.com/freescout-help-desk/freescout/issues/5333
+        //
+        // Advally null-guard (LT-461315 / bug #181): in our team/mailbox model
+        // most conversations have no individual assignee, so user_id is NULL and
+        // $this->user resolves to null. The upstream code dereferences that null
+        // ($conv_user->can(...)) -> FatalThrowableError -> FreeScout 500, surfaced
+        // by the reporting app as a 502 mailbox_change_failed so the reply never
+        // sends. Guard both derefs: a NULL assignee has no view constraint to check.
         $conv_user = $user;
-        if ($this->user_id != $user->id) {
+        if ($this->user_id && $this->user_id != $user->id) {
             $conv_user = $this->user;
         }
-        if (!$conv_user->can('view', $mailbox)) {
+        if ($conv_user && !$conv_user->can('view', $mailbox)) {
             $this->changeUser(self::USER_UNASSIGNED, $user, $create_thread = true);
         }
 

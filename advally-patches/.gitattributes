@@ -1,0 +1,4 @@
+# reapply.sh runs on Linux prod and the .patch context must match byte-for-byte,
+# so pin LF regardless of any contributor box's core.autocrlf.
+*.sh   text eol=lf
+*.patch text eol=lf
