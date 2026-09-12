@@ -1496,6 +1496,15 @@ class FetchEmails extends Command
 
         // This is reply, we need to separate reply text from old text
         if ($is_reply) {
+            // Advally patch (IT #1175): a sender who answers inside or below the quote
+            // (Thunderbird / Apple Mail inline style) leaves their text between the
+            // <blockquote type="cite"> blocks. Splitting at the first separator keeps
+            // only the "On ... wrote:" line above the quote and silently drops every
+            // answer, so keep the whole body instead. A noisy thread beats a lost one.
+            if (!$user_reply_to_notification && self::isInterleavedReply($result)) {
+                return $result;
+            }
+
             // Check all separators and choose the shortest reply
             $reply_bodies = [];
 
@@ -1536,7 +1545,8 @@ class FetchEmails extends Command
                     $text = trim($text);
                     $text = preg_replace('/^\s+/mu', '', $text);
 
-                    if ($text) {
+                    // Advally patch (IT #1175): an attribution line alone is not a reply.
+                    if ($text && !self::isAttributionOnly($text)) {
                         $reply_bodies[] = $parts[0];
                     }
                 }
@@ -1549,6 +1559,71 @@ class FetchEmails extends Command
         }
 
         return $result;
+    }
+
+    /**
+     * Advally patch (IT #1175): true when the sender wrote text after a
+     * <blockquote type="cite"> quote began, outside every such quote. That is an
+     * inline or bottom-posted reply, and splitting it at a separator loses it.
+     *
+     * Ignored when looking for that text: attribution lines ("On ... wrote:") and
+     * Thunderbird's moz-signature block, so a top-posted reply whose signature sits
+     * below the quote is still separated as before.
+     *
+     * @param string $html
+     *
+     * @return bool
+     */
+    public static function isInterleavedReply($html)
+    {
+        if (stripos($html ?? '', '<blockquote type="cite"') === false) {
+            return false;
+        }
+
+        $dom = new \DOMDocument();
+        libxml_use_internal_errors(true);
+        // The XML declaration makes libxml read the fragment as UTF-8.
+        $dom->loadHTML('<?xml encoding="UTF-8"><body>'.$html.'</body>', LIBXML_PARSEHUGE);
+        libxml_clear_errors();
+        libxml_use_internal_errors(false);
+
+        $xpath = new \DOMXPath($dom);
+        $cite = 'blockquote[@type="cite"]';
+        $first_quote = $xpath->query('//'.$cite.'[not(ancestor::'.$cite.')]')->item(0);
+        if (!$first_quote) {
+            return false;
+        }
+
+        $signature = 'contains(concat(" ", normalize-space(@class), " "), " moz-signature ")';
+        $after = $xpath->query('following::text()[not(ancestor::'.$cite.')][not(ancestor::*['.$signature.'])]', $first_quote);
+        foreach ($after as $node) {
+            $text = trim(preg_replace('/[\s\x{00A0}]+/u', ' ', $node->nodeValue));
+            if ($text === '' || self::isAttributionOnly($text)) {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Advally patch (IT #1175): true when the text is nothing but a quote attribution
+     * such as "On 8/3/2026 4:34 AM, Newschoolers AM wrote:" or "Le 3 août 2026, X a écrit :".
+     *
+     * @param string $text
+     *
+     * @return bool
+     */
+    public static function isAttributionOnly($text)
+    {
+        $text = trim(preg_replace('/[\s\x{00A0}]+/u', ' ', $text ?? ''));
+        if ($text === '' || mb_strlen($text) > 400) {
+            return false;
+        }
+
+        return (bool) preg_match('/^(on|le|am|el|il|op)\b.*\b(wrote|a écrit|schrieb|escribió|ha scritto|schreef)\s*:?$/iu', $text);
     }
 
     public function replaceCidsWithAttachmentUrls($body, $attachments, $conversation, $prev_has_attachments)
